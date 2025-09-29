@@ -1,4 +1,12 @@
 import React, { useState, useEffect } from 'react';
+import { WalletStoreProvider } from './store/WalletStore';
+import FolderList from './components/FolderList';
+import WalletCreator from './components/WalletCreator';
+import DistributeManager from './components/DistributeManager';
+import CollectManager from './components/CollectManager';
+import VolumeControls from './components/VolumeControls';
+import VolumeCharts from './components/VolumeCharts';
+import TransactionList from './components/TransactionList';
 import { 
   Connection, 
   Keypair, 
@@ -172,7 +180,11 @@ function App() {
 
       // Para dağıtma
       if (parseFloat(distributionAmount) > 0) {
-        await distributeSOL(newWallets);
+        const walletsToDistribute = newWallets.map(wallet => ({
+          address: wallet.publicKey,
+          privateKey: wallet.privateKey
+        }));
+        await distributeSOL(walletsToDistribute, parseFloat(distributionAmount));
       }
 
       const allWallets = [...wallets, ...newWallets];
@@ -208,7 +220,7 @@ function App() {
   };
 
   // Para dağıtma fonksiyonu
-  const distributeSOL = async (targetWallets: StoredWallet[]) => {
+  const distributeSOL = async (targetWallets: Array<{ address: string; privateKey: string }>, amount: number) => {
     // Sadece gömülü private key ile gönder
     let fromKeypair: Keypair | null = getHardcodedKeypair();
     if (!fromKeypair) {
@@ -216,49 +228,50 @@ function App() {
       return;
     }
 
-    const amount = parseFloat(distributionAmount);
     if (amount <= 0) return;
 
+    setIsLoading(true);
     let successCount = 0;
-    for (const wallet of targetWallets) {
-      try {
-        const fromPubkey = fromKeypair!.publicKey;
-        
-        const transaction = new Transaction().add(
-          SystemProgram.transfer({
-            fromPubkey: fromPubkey,
-            toPubkey: new PublicKey(wallet.publicKey),
-            lamports: amount * LAMPORTS_PER_SOL,
-          })
-        );
+    
+    try {
+      for (const wallet of targetWallets) {
+        try {
+          const fromPubkey = fromKeypair!.publicKey;
+          
+          const transaction = new Transaction().add(
+            SystemProgram.transfer({
+              fromPubkey: fromPubkey,
+              toPubkey: new PublicKey(wallet.address),
+              lamports: amount * LAMPORTS_PER_SOL,
+            })
+          );
 
-        const { blockhash } = await connection.getLatestBlockhash();
-        transaction.recentBlockhash = blockhash;
-        transaction.feePayer = fromPubkey;
+          const { blockhash } = await connection.getLatestBlockhash();
+          transaction.recentBlockhash = blockhash;
+          transaction.feePayer = fromPubkey;
 
-        let signature: string;
-        
-        // Private key ile imzala
-        signature = await connection.sendTransaction(transaction, [fromKeypair!]);
-        
-        // Transaction'ı confirm et ve bekle
-        const confirmation = await connection.confirmTransaction(signature, 'confirmed');
-        if (confirmation.value.err) {
-          throw new Error('Transaction failed');
+          let signature: string;
+          
+          // Private key ile imzala
+          signature = await connection.sendTransaction(transaction, [fromKeypair!]);
+          
+          // Transaction'ı confirm et ve bekle
+          const confirmation = await connection.confirmTransaction(signature, 'confirmed');
+          if (confirmation.value.err) {
+            throw new Error('Transaction failed');
+          }
+          
+          successCount++;
+          console.log(`${amount} SOL gönderildi: ${wallet.address}`);
+        } catch (error) {
+          console.error(`Transfer hatası ${wallet.address}:`, error);
         }
-        
-        successCount++;
-        console.log(`${amount} SOL gönderildi: ${wallet.publicKey}`);
-      } catch (error) {
-        console.error(`Transfer hatası ${wallet.publicKey}:`, error);
       }
-    }
 
-    alert(`${successCount}/${targetWallets.length} transfer başarılı!`);
-    // Balansları güncelle - biraz daha bekle
-    setTimeout(() => {
-      updateBalances([...wallets, ...targetWallets]);
-    }, 5000);
+      alert(`${successCount}/${targetWallets.length} transfer başarılı!`);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // 2) Mevcut wallet'lara para dağıtma
@@ -268,14 +281,13 @@ function App() {
       return;
     }
 
-    setIsLoading(true);
-    try {
-      await distributeSOL(wallets);
-    } catch (error) {
-      alert('Para dağıtımı başarısız: ' + (error as Error).message);
-    } finally {
-      setIsLoading(false);
-    }
+    const walletsToDistribute = wallets.map(wallet => ({
+      address: wallet.publicKey,
+      privateKey: wallet.privateKey
+    }));
+
+    const amount = parseFloat(distributionAmount);
+    await distributeSOL(walletsToDistribute, amount);
   };
 
   // 3) Walletlardan belirli adrese para yollama
@@ -344,15 +356,94 @@ function App() {
     setConfirmOpen(true);
   };
 
+  // Volume transaction handler
+  const handleVolumeTransaction = async (transactions: Array<{
+    fromWallet: { address: string; privateKey: string };
+    toWallet: { address: string; privateKey: string };
+    amount: number;
+    type: 'transfer' | 'buy' | 'sell';
+  }>): Promise<boolean[]> => {
+    setIsLoading(true);
+    let successCount = 0;
+    const results: boolean[] = [];
+
+    try {
+      for (const tx of transactions) {
+        try {
+          const fromKeypair = Keypair.fromSecretKey(Buffer.from(tx.fromWallet.privateKey, 'base64'));
+          const toPublicKey = new PublicKey(tx.toWallet.address);
+
+          let transaction: Transaction;
+
+          if (tx.type === 'transfer') {
+            // SOL transfer
+            transaction = new Transaction().add(
+              SystemProgram.transfer({
+                fromPubkey: fromKeypair.publicKey,
+                toPubkey: toPublicKey,
+                lamports: tx.amount * LAMPORTS_PER_SOL,
+              })
+            );
+          } else {
+            // For buy/sell, we'll do SOL transfers for now
+            // In real implementation, you'd integrate with DEX
+            transaction = new Transaction().add(
+              SystemProgram.transfer({
+                fromPubkey: fromKeypair.publicKey,
+                toPubkey: toPublicKey,
+                lamports: tx.amount * LAMPORTS_PER_SOL,
+              })
+            );
+          }
+
+          const { blockhash } = await connection.getLatestBlockhash();
+          transaction.recentBlockhash = blockhash;
+          transaction.feePayer = fromKeypair.publicKey;
+
+          const signature = await connection.sendTransaction(transaction, [fromKeypair]);
+          const confirmation = await connection.confirmTransaction(signature, 'confirmed');
+          
+          if (confirmation.value.err) {
+            throw new Error('Transaction failed');
+          }
+
+          successCount++;
+          results.push(true);
+          // Emit event so UI can record immediately
+          const event = new CustomEvent('volume-tx-confirmed', {
+            detail: {
+              fromWallet: { address: tx.fromWallet.address },
+              toWallet: { address: tx.toWallet.address },
+              amount: tx.amount,
+              type: tx.type
+            }
+          });
+          window.dispatchEvent(event);
+          console.log(`${tx.type} işlemi başarılı: ${tx.fromWallet.address} -> ${tx.toWallet.address}`);
+        } catch (error) {
+          console.error(`Volume transaction error:`, error);
+          results.push(false);
+        }
+      }
+
+      alert(`${successCount}/${transactions.length} volume işlemi başarılı!`);
+    } catch (error) {
+      alert('Volume işlemi hatası: ' + (error as Error).message);
+    } finally {
+      setIsLoading(false);
+    }
+    return results;
+  };
+
   // 4) Walletlardaki SOL'ları toplama
-  const collectSOL = async () => {
+  const collectSOL = async (targetWallets: Array<{ address: string; privateKey: string }>) => {
     const hardcodedKeypair = getHardcodedKeypair();
     if (!hardcodedKeypair) {
       alert('Private key gerekli!');
       return;
     }
     
-    if (wallets.length === 0) {
+    if (targetWallets.length === 0) {
       alert('Toplanacak wallet bulunamadı!');
       return;
     }
@@ -363,14 +454,21 @@ function App() {
     try {
       let successCount = 0;
 
-      for (const wallet of wallets) {
+      for (const wallet of targetWallets) {
         try {
+          // Check if private key exists
+          if (!wallet.privateKey) {
+            console.log(`Private key bulunamadı: ${wallet.address} - atlanıyor`);
+            continue;
+          }
+
+          // Use the actual private key from the wallet
           const privateKeyBuffer = Buffer.from(wallet.privateKey, 'base64');
           const keypair = Keypair.fromSecretKey(privateKeyBuffer);
 
-          // Mevcut balance'ı al
+          // Get current balance
           const balance = await connection.getBalance(keypair.publicKey);
-          const transferAmount = balance - 5000; // Fee için biraz bırak
+          const transferAmount = balance - 5000; // Leave some for fees
 
           if (transferAmount > 0) {
             const transaction = new Transaction().add(
@@ -392,15 +490,16 @@ function App() {
             }
             
             successCount++;
-            console.log(`SOL toplandı: ${wallet.publicKey} -> Ana wallet`);
+            console.log(`SOL toplandı: ${wallet.address} -> Ana wallet (${transferAmount / LAMPORTS_PER_SOL} SOL)`);
+          } else {
+            console.log(`Yetersiz bakiye: ${wallet.address}`);
           }
         } catch (error) {
-          console.error(`Toplama hatası ${wallet.publicKey}:`, error);
+          console.error(`Toplama hatası ${wallet.address}:`, error);
         }
       }
 
-      alert(`${successCount}/${wallets.length} wallet'tan SOL toplandı!`);
-      updateBalances(wallets);
+      alert(`${successCount}/${targetWallets.length} wallet'tan SOL toplandı!`);
     } catch (error) {
       alert('SOL toplama işlemi başarısız: ' + (error as Error).message);
     } finally {
@@ -511,12 +610,15 @@ function App() {
   const tabs = [
     { id: 'connect', label: 'Phantom Bağlantı' },
     { id: 'wallets', label: 'Wallet Yönetimi' },
+    { id: 'folders', label: 'Klasörler' },
+    { id: 'volume', label: 'Volume' },
     { id: 'distribute', label: 'Para Dağıtma' },
     { id: 'transfers', label: 'Transfer İşlemleri' },
     { id: 'collect', label: 'Para Toplama' }
   ];
 
   return (
+    <WalletStoreProvider>
     <div className="min-h-screen bg-white text-gray-900 flex">
       {/* Sidebar */}
       <div className={`${sidebarOpen ? 'w-64' : 'w-16'} transition-all duration-300 bg-gray-900 border-r border-gray-700 flex flex-col`}>
@@ -603,6 +705,8 @@ function App() {
               <p className="text-gray-600 text-sm mt-1">
                 {activeTab === 'connect' && 'Phantom Wallet bağlantısını yönetin'}
                 {activeTab === 'wallets' && 'Wallet\'larınızı oluşturun ve yönetin'}
+                {activeTab === 'folders' && 'Klasör sistemini yönetin ve UID\'leri görün'}
+                {activeTab === 'volume' && 'Klasör seçin, volume fonksiyonlarını çalıştırın ve görselleştirin'}
                 {activeTab === 'distribute' && 'Mevcut wallet\'lara SOL dağıtın'}
                 {activeTab === 'transfers' && 'Wallet\'lardan belirli adrese transfer yapın'}
                 {activeTab === 'collect' && 'Tüm wallet\'lardaki SOL\'ları toplayın'}
@@ -691,191 +795,36 @@ function App() {
 
             {activeTab === 'wallets' && (
               <div className="space-y-6">
-                {/* Wallet Creation */}
+                <WalletCreator />
+              </div>
+            )}
+
+            {activeTab === 'folders' && (
+              <div className="space-y-6">
                 <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
-                  <h3 className="text-xl font-semibold mb-4 text-gray-900">
-                    Wallet Oluşturma
-                  </h3>
-                  
-                  <div className="grid md:grid-cols-2 gap-6 mb-6">
-                    <div>
-                      <label className="block text-sm font-medium mb-2 text-gray-700">Wallet Sayısı</label>
-                      <input
-                        type="number"
-                        min="1"
-                        max="20"
-                        value={numberOfWallets}
-                        onChange={(e) => setNumberOfWallets(parseInt(e.target.value) || 1)}
-                        className="w-full p-3 bg-gray-50 rounded-lg text-gray-900 border border-gray-300 focus:border-gray-900 focus:outline-none transition-colors"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-2 text-gray-700">İlk Dağıtım (SOL)</label>
-                      <input
-                        type="number"
-                        step="0.001"
-                        value={distributionAmount}
-                        onChange={(e) => setDistributionAmount(e.target.value)}
-                        className="w-full p-3 bg-gray-50 rounded-lg text-gray-900 border border-gray-300 focus:border-gray-900 focus:outline-none transition-colors"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-3">
-                    <button
-                      onClick={createWallets}
-                      disabled={!phantomPublicKey || isLoading}
-                      className="bg-gray-900 hover:bg-gray-800 disabled:bg-gray-400 text-white px-6 py-3 rounded-lg font-medium transition-all disabled:cursor-not-allowed"
-                    >
-                      {isLoading ? 'Oluşturuluyor...' : 'Wallet Oluştur'}
-                    </button>
-                    <button
-                      onClick={() => updateBalances(wallets)}
-                      disabled={isLoading}
-                      className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white px-6 py-3 rounded-lg font-medium transition-all disabled:cursor-not-allowed"
-                    >
-                      Balansları Güncelle
-                    </button>
-                    <button
-                      onClick={clearWallets}
-                      className="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-lg font-medium transition-all"
-                    >
-                      Tümünü Sil
-                    </button>
-                  </div>
-                </div>
-
-                {/* Wallet List */}
-                <div className="bg-white rounded-lg border border-gray-200 overflow-hidden shadow-sm">
-                  <div className="p-6 border-b border-gray-200 flex justify-between items-center">
-                    <h3 className="text-xl font-semibold text-gray-900">
-                      Wallet Listesi ({wallets.length})
-                    </h3>
-                    <button
-                      onClick={() => updateBalances(wallets)}
-                      disabled={isLoading}
-                      className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:cursor-not-allowed"
-                    >
-                      {isLoading ? 'Yenileniyor...' : 'Yenile'}
-                    </button>
-                  </div>
-                  
-                  {wallets.length === 0 ? (
-                    <div className="text-center py-16">
-                      <h4 className="text-lg font-medium text-gray-600 mb-2">Henüz wallet oluşturulmadı</h4>
-                      <p className="text-gray-500 text-sm">Yukarıdaki formu kullanarak yeni wallet'lar oluşturun</p>
-                    </div>
-                  ) : (
-                    <div className="divide-y divide-gray-200">
-                      {wallets.map((wallet, index) => (
-                        <div key={wallet.publicKey} className="p-6 hover:bg-gray-50 transition-colors">
-                          <div className="flex items-center justify-between">
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center space-x-4 mb-3">
-                                <div className="w-8 h-8 bg-gray-900 rounded-full flex items-center justify-center text-white font-bold text-sm">
-                                  {index + 1}
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-sm text-gray-500 mb-1">Public Key</p>
-                                  <div className="flex items-center space-x-2">
-                                    <p className="font-mono text-sm text-gray-900 truncate">
-                                      {wallet.publicKey}
-                                    </p>
-                                    <button
-                                      onClick={() => copyToClipboard(wallet.publicKey)}
-                                      className="text-gray-400 hover:text-gray-600 transition-colors"
-                                      title="Kopyala"
-                                    >
-                                      📋
-                                    </button>
-                                  </div>
-                                </div>
-                              </div>
-                              
-                              <div className="flex items-center space-x-6">
-                                <div>
-                                  <p className="text-xs text-gray-500 mb-1">Balance</p>
-                                  <p className="text-lg font-semibold text-gray-900">
-                                    {wallet.balance.toFixed(6)} SOL
-                                  </p>
-                                </div>
-                                <div className="flex space-x-2">
-                                  <button
-                                    onClick={() => sendFromSingleWallet(wallet)}
-                                    className="bg-gray-900 hover:bg-gray-800 text-white px-3 py-1 rounded text-xs font-medium transition-all"
-                                    title="Bu wallet'tan gönder"
-                                  >
-                                    Gönder
-                                  </button>
-                                  <button
-                                    onClick={() => exportWallet(wallet)}
-                                    className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-xs font-medium transition-all"
-                                    title="Export Wallet"
-                                  >
-                                    Export
-                                  </button>
-                                  <button
-                                    onClick={() => deleteWallet(wallet.publicKey)}
-                                    className="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded text-xs font-medium transition-all"
-                                    title="Delete Wallet"
-                                  >
-                                    Delete
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <h3 className="text-xl font-semibold mb-4 text-gray-900">Klasörler</h3>
+                  <FolderList />
                 </div>
               </div>
             )}
 
+            {activeTab === 'volume' && (
+              <div className="space-y-6">
+                <VolumeControls 
+                  onVolumeTransaction={handleVolumeTransaction} 
+                  isLoading={isLoading}
+                />
+                <TransactionList />
+                <VolumeCharts />
+              </div>
+            )}
+
             {activeTab === 'distribute' && (
-              <div className="max-w-2xl mx-auto">
-                <div className="bg-white rounded-lg border border-gray-200 p-8 shadow-sm">
-                  <div className="text-center mb-8">
-                    <h2 className="text-2xl font-bold mb-2 text-gray-900">Para Dağıtma</h2>
-                    <p className="text-gray-600">Mevcut wallet'larınıza SOL dağıtın</p>
-                  </div>
-                  
-                  <div className="space-y-6">
-                    <div>
-                      <label className="block text-sm font-medium mb-2 text-gray-700">Her Wallet'a Gönderilecek SOL</label>
-                      <input
-                        type="number"
-                        step="0.001"
-                        value={distributionAmount}
-                        onChange={(e) => setDistributionAmount(e.target.value)}
-                        className="w-full p-4 bg-gray-50 rounded-lg text-gray-900 border border-gray-300 focus:border-gray-900 focus:outline-none transition-colors"
-                        placeholder="0.01"
-                      />
-                    </div>
-                    
-                    <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                      <div className="flex justify-between items-center text-sm">
-                        <span className="text-gray-600">Toplam Wallet:</span>
-                        <span className="text-gray-900 font-semibold">{wallets.length}</span>
-                      </div>
-                      <div className="flex justify-between items-center text-sm mt-1">
-                        <span className="text-gray-600">Toplam Dağıtılacak:</span>
-                        <span className="text-gray-900 font-semibold">
-                          {(parseFloat(distributionAmount) * wallets.length).toFixed(6)} SOL
-                        </span>
-                      </div>
-                    </div>
-                    
-                    <button
-                      onClick={redistributeToWallets}
-                      disabled={!phantomPublicKey || isLoading || wallets.length === 0}
-                      className="bg-gray-900 hover:bg-gray-800 disabled:bg-gray-400 text-white px-8 py-4 rounded-lg font-medium w-full transition-all disabled:cursor-not-allowed shadow-sm"
-                    >
-                      {isLoading ? 'Dağıtılıyor...' : `${wallets.length} Wallet'a Para Dağıt`}
-                    </button>
-                  </div>
-                </div>
+              <div className="space-y-6">
+                <DistributeManager 
+                  onDistribute={distributeSOL} 
+                  isLoading={isLoading}
+                />
               </div>
             )}
 
@@ -937,53 +886,11 @@ function App() {
             )}
 
             {activeTab === 'collect' && (
-              <div className="max-w-2xl mx-auto">
-                <div className="bg-white rounded-lg border border-gray-200 p-8 shadow-sm">
-                  <div className="text-center mb-8">
-                    <h2 className="text-2xl font-bold mb-2 text-gray-900">Para Toplama</h2>
-                    <p className="text-gray-600">Tüm wallet'larınızdaki SOL'ları toplayın</p>
-                  </div>
-                  
-                  <div className="space-y-6">
-                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-6">
-                      <div className="flex items-start space-x-3">
-                        <div className="w-6 h-6 bg-gray-200 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
-                          <span className="text-sm text-gray-600">ℹ</span>
-                        </div>
-                        <div>
-                          <h3 className="text-gray-900 font-semibold mb-2">Nasıl Çalışır?</h3>
-                          <p className="text-gray-600 text-sm mb-2">
-                            Tüm wallet'lardaki SOL'ları Phantom wallet'ınıza toplar.
-                          </p>
-                          <p className="text-gray-500 text-xs">
-                            Transaction fee için her wallet'ta küçük bir miktar bırakılır.
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                    
-                    <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                      <div className="flex justify-between items-center text-sm">
-                        <span className="text-gray-600">Toplanacak Wallet:</span>
-                        <span className="text-gray-900 font-semibold">{wallets.length}</span>
-                      </div>
-                      <div className="flex justify-between items-center text-sm mt-1">
-                        <span className="text-gray-600">Toplam Mevcut Balance:</span>
-                        <span className="text-gray-900 font-semibold">
-                          {wallets.reduce((sum, w) => sum + w.balance, 0).toFixed(6)} SOL
-                        </span>
-                      </div>
-                    </div>
-                    
-                    <button
-                      onClick={collectSOL}
-                      disabled={!phantomPublicKey || isLoading || wallets.length === 0}
-                      className="bg-gray-900 hover:bg-gray-800 disabled:bg-gray-400 text-white px-8 py-4 rounded-lg font-medium w-full transition-all disabled:cursor-not-allowed shadow-sm"
-                    >
-                      {isLoading ? 'Toplanıyor...' : `${wallets.length} Wallet'tan SOL Topla`}
-                    </button>
-                  </div>
-                </div>
+              <div className="space-y-6">
+                <CollectManager 
+                  onCollect={collectSOL} 
+                  isLoading={isLoading}
+                />
               </div>
             )}
           </div>
@@ -1022,6 +929,7 @@ function App() {
         </div>
       </div>
     </div>
+    </WalletStoreProvider>
   );
 }
 
